@@ -63,7 +63,7 @@ int Ntfs::doMount(const char *fsPath, const char *mountPoint,
     flags |= (remount ? MS_REMOUNT : 0);
 
     // Testing/security, mount ro up to now
-    flags |= MS_RDONLY;
+//    flags |= MS_RDONLY;
     
     /*
      * Note: This is a temporary hack. If the sampling profiler is enabled,

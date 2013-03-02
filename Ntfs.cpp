@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (C) 2012 Team Eos & Chris Trotman
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -27,9 +28,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/mman.h>
-#include <sys/mount.h>
 
 #include <linux/kdev_t.h>
+#include <linux/fs.h>
 
 #define LOG_TAG "Vold"
 
@@ -38,15 +39,48 @@
 
 #include "Ntfs.h"
 
+static char NTFS3G_PATH[] = "/system/bin/ntfs-3g";
+static char NTFS3G_PROBE_PATH[] = "/system/bin/ntfs-3g.probe";
+static char NTFSFIX_PATH[] = "/system/bin/ntfsfix";
 extern "C" int logwrap(int argc, const char **argv, int background);
 extern "C" int mount(const char *, const char *, const char *, unsigned long, const void *);
 
 int Ntfs::check(const char *fsPath) {
-  
-    // no NTFS file system check is performed, always return true
-    SLOGI("Ntfs filesystem: Skipping fs checks\n");
-    return 0;
+    bool rw = true;
+    if (access(NTFS3G_PROBE_PATH, X_OK)) {
+        SLOGW("Skipping fs checks\n");
+        return 0;
+    }
 
+    int rc = 0;
+    const char *args[5];
+    args[0] = NTFS3G_PROBE_PATH;
+    args[1] = "-w";
+    args[2] = fsPath;
+    args[3] = NULL;
+
+    rc = logwrap(3, args, 1);
+
+    switch (rc) {
+        case 0:
+            SLOGI("NTFS filesystem found");
+            return 0;
+        case 13: // Inconsistent NTFS
+        case 14: // NTFS Partition is hibernated
+        case 15: // NTFS Partition was uncleanly unmounted.
+            SLOGI("Inconsistent NTFS filesystem found. Trying to fix.");
+            rc = 0;
+            args[0] = NTFSFIX_PATH;
+            args[1] = fsPath;
+            args[2] = NULL;
+            rc = logwrap(2, args, 1);
+            if (rc == 0) return 0;
+            else return 1;
+        default:
+            return 2;
+    }
+
+    return 0;
 }
 
 int Ntfs::doMount(const char *fsPath, const char *mountPoint,
@@ -54,51 +88,41 @@ int Ntfs::doMount(const char *fsPath, const char *mountPoint,
                  int ownerUid, int ownerGid, int permMask, bool createLost) {
     int rc;
     unsigned long flags;
-    char mountData[255];
+    char mountOptions[255];
+    const char *args[5];
 
-    flags = MS_NODEV | MS_NOSUID | MS_DIRSYNC;
+    sprintf(mountOptions,
+            "-o nodev,nosuid,sync,noexec,utf8,uid=%d,gid=%d,fmask=%o,dmask=%o%s%s",
+            ownerUid, ownerGid, permMask, permMask, (ro ? ",ro" : ""),
+            (remount ? ",remount" : ""));
 
-    flags |= (executable ? 0 : MS_NOEXEC);
-    flags |= (ro ? MS_RDONLY : 0);
-    flags |= (remount ? MS_REMOUNT : 0);
+    args[0] = NTFS3G_PATH;
+    args[1] = mountOptions;
+    args[2] = fsPath;
+    args[3] = mountPoint;
+    args[4] = NULL;
 
-    // Testing/security, mount ro up to now
-//    flags |= MS_RDONLY;
-    
-    /*
-     * Note: This is a temporary hack. If the sampling profiler is enabled,
-     * we make the SD card world-writable so any process can write snapshots.
-     *
-     * TODO: Remove this code once we have a drop box in system_server.
-     */
-    char value[PROPERTY_VALUE_MAX];
-    property_get("persist.sampling_profiler", value, "");
-    if (value[0] == '1') {
-        SLOGW("The SD card is world-writable because the"
-            " 'persist.sampling_profiler' system property is set to '1'.");
-        permMask = 0;
-    }
-
-    sprintf(mountData,
-            "uid=%d,gid=%d,fmask=%o,dmask=%o",
-            ownerUid, ownerGid, permMask, permMask);
-
-    rc = mount(fsPath, mountPoint, "ntfs", flags, mountData);
+    rc = logwrap(4, args, 1);
 
     if (rc && errno == EROFS) {
         SLOGE("%s appears to be a read only filesystem - retrying mount RO", fsPath);
-        flags |= MS_RDONLY;
-        rc = mount(fsPath, mountPoint, "ntfs", flags, mountData);
+        sprintf(mountOptions,
+                "-o nodev,nosuid,sync,noexec,utf8,uid=%d,gid=%d,fmask=%o,dmask=%o,ro%s",
+                ownerUid, ownerGid, permMask, permMask, (remount ? ",remount" : ""));
+
+        args[0] = NTFS3G_PATH;
+        args[1] = mountOptions;
+        args[2] = fsPath;
+        args[3] = mountPoint;
+        args[4] = NULL;
+
+        rc = logwrap(4, args, 1);
     }
 
     return rc;
 }
 
 int Ntfs::format(const char *fsPath, unsigned int numSectors) {
-    
-    SLOGE("Format ntfs filesystem not supported\n");
-    errno = EIO;
-    return -1;
-
+    return -1; // Formatting Ntfs is not supported.
 }
 
